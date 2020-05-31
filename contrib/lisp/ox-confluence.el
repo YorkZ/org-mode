@@ -1,6 +1,6 @@
 ;;; ox-confluence --- Confluence Wiki Back-End for Org Export Engine
 
-;; Copyright (C) 2012, 2014 Sébastien Delafond
+;; Copyright (C) 2012, 2020 Sébastien Delafond
 
 ;; Author: Sébastien Delafond <sdelafond@gmail.com>
 ;; Keywords: outlines, confluence, wiki
@@ -23,7 +23,9 @@
 ;;; Commentary:
 ;;
 ;; ox-confluence.el lets you convert Org files to confluence files
-;; using the ox.el export engine.
+;; using the ox.el export engine. Check out
+;; https://confluence.atlassian.com/doc/confluence-wiki-markup-251003035.html
+;; for a decription of the Confluence Wiki Markup syntax.
 ;;
 ;; Put this file into your load-path and the following into your ~/.emacs:
 ;;	 (require 'ox-confluence)
@@ -39,28 +41,31 @@
 ;; Define the backend itself
 (org-export-define-derived-backend 'confluence 'ascii
   :translate-alist '((bold . org-confluence-bold)
-		     (code . org-confluence-code)
-		     (example-block . org-confluence-example-block)
-		     (fixed-width . org-confluence-fixed-width)
-		     (footnote-definition . org-confluence-empty)
-		     (footnote-reference . org-confluence-empty)
-		     (headline . org-confluence-headline)
-		     (italic . org-confluence-italic)
-		     (item . org-confluence-item)
-		     (link . org-confluence-link)
-		     (paragraph . org-confluence-paragraph)
-		     (property-drawer . org-confluence-property-drawer)
-		     (quote-block . org-confluence-quote-block)
-		     (section . org-confluence-section)
-		     (src-block . org-confluence-src-block)
-		     (strike-through . org-confluence-strike-through)
-		     (table . org-confluence-table)
-		     (table-cell . org-confluence-table-cell)
-		     (table-row . org-confluence-table-row)
-		     (template . org-confluence-template)
-		     (timestamp . org-confluence-timestamp)
-		     (underline . org-confluence-underline)
-		     (verbatim . org-confluence-verbatim))
+                     (code . org-confluence-code)
+                     (example-block . org-confluence-example-block)
+                     (fixed-width . org-confluence-fixed-width)
+                     (footnote-definition . org-confluence-empty)
+                     (footnote-reference . org-confluence-footnote-reference)
+                     (headline . org-confluence-headline)
+                     (italic . org-confluence-italic)
+                     (item . org-confluence-item)
+                     (link . org-confluence-link)
+                     (plain-list . org-confluence-plain-list)
+                     (paragraph . org-confluence-paragraph)
+                     (property-drawer . org-confluence-property-drawer)
+                     (quote-block . org-confluence-quote-block)
+                     (section . org-confluence-section)
+                     (src-block . org-confluence-src-block)
+                     (strike-through . org-confluence-strike-through)
+                     (table . org-confluence-table)
+                     (table-cell . org-confluence-table-cell)
+                     (table-row . org-confluence-table-row)
+                     (template . org-confluence-template)
+                     (timestamp . org-confluence-timestamp)
+                     (underline . org-confluence-underline)
+                     (verbatim . org-confluence-verbatim)
+                     (inner-template . org-confluence-inner-template)
+                     (verbatim . org-confluence-verbatim))
   :menu-entry
   '(?f "Export to Confluence"
        ((?f "As Confluence buffer" org-confluence-export-as-confluence))))
@@ -70,12 +75,44 @@
   "Map from org-babel language name to confluence wiki language name"
   :type '(alist :key-type string :value-type string))
 
+(defun org-confluence-escape-chars (str)
+  (with-temp-buffer
+    (insert str)
+    (goto-char (point-min))
+    (while (search-forward "~" nil t)
+      (replace-match "\\\\~"))
+    (buffer-string)))
+
 ;; All the functions we use
 (defun org-confluence-bold (bold contents info)
   (format "*%s*" contents))
 
 (defun org-confluence-empty (empty contents info)
   "")
+
+(defun org-confluence-footnote-reference (footnote-reference _contents info)
+  "Transcode a FOOTNOTE-REFERENCE element from Org to ASCII.
+CONTENTS is nil.  INFO is a plist holding contextual information."
+  (let ((footnote-number (org-export-get-footnote-number footnote-reference
+							 info)))
+    (format " ^[%d|#fn_%d]^ " footnote-number footnote-number)))
+
+(defun org-confluence-inner-template (contents info)
+  (concat
+   ;; 1. Document's body.
+   contents
+   ;; 2. Footnote definitions.
+   (let ((definitions (org-export-collect-footnote-definitions info)))
+     (when definitions
+       (concat
+	"\n\n"
+	"h1. Footnotes\n"
+	(mapconcat
+	 (lambda (ref)
+	   (let ((footnote-number (car ref)))
+	     (format "  %d. {anchor:fn_%d} %s" footnote-number footnote-number
+		     (org-export-data (nth 2 ref) info))))
+	 definitions "\n"))))))
 
 (defun org-confluence-example-block (example-block contents info)
   ;; FIXME: provide a user-controlled variable for theme
@@ -120,31 +157,79 @@
 	 (todo (org-export-data (org-element-property :todo-keyword headline)
 				info))
 	 (level (org-export-get-relative-level headline info))
+	 (anchor (format "{anchor:%s}"
+			 (org-export-get-headline-number headline info)))
 	 (todo-text (if (or (not (plist-get info :with-todo-keywords))
 			    (string= todo ""))
 			""
 		      (format "*{{%s}}* " todo))))
-    (format "h%s. %s%s\n%s" level todo-text text
+    (format "h%s. %s %s%s\n%s" level anchor todo-text text
             (if (org-string-nw-p contents) contents ""))))
 
 (defun org-confluence-link (link desc info)
   (if (string= "radio" (org-element-property :type link))
       desc
-    (let ((raw-link (org-element-property :raw-link link)))
-      (concat "["
+    (let* ((raw-link (org-element-property :raw-link link))
+           (type (org-element-property :type link))
+           (path (org-element-property :path link))
+           (link-bracket (if (org-export-inline-image-p link)
+                             '("!" . "!")
+                           '("[" . "]"))))
+      (cond
+       ((and (equal type "file") path)
+        (setq raw-link (file-name-nondirectory path)))
+       ((member type '("custom-id" "fuzzy" "id"))
+        (let ((destination (if (string= type "fuzzy")
+                               (org-export-resolve-fuzzy-link link info)
+                             (org-export-resolve-id-link link info))))
+          (cl-case (org-element-type destination)
+            ;; TODO: Id link points to an external file.
+            (plain-text)
+            ;; TODO: Fuzzy link points nowhere.
+            ((nil))
+            ;; link points to a headline.
+            (headline
+             (setq raw-link
+                   (format "#%s"
+                           (org-export-get-headline-number destination info))))
+            ;; Fuzzy link points to a target.
+            (otherwise
+             (setq raw-link
+                   (format "#%s"
+                           (org-export-get-reference destination info))))))))
+      (concat (car link-bracket)
               (when (org-string-nw-p desc) (format "%s|" desc))
-              (cond
-               ((string-match "^confluence:" raw-link)
-		(replace-regexp-in-string "^confluence:" "" raw-link))
-               (t
-		raw-link))
-              "]"))))
+              raw-link
+              (cdr link-bracket)))))
+
+(defun org-confluence-plain-list (plain-list contents info)
+  "Transcode a PLAIN-LIST element from Org to confluence.
+CONTENTS is the contents of the list.  INFO is a plist holding
+contextual information."
+  (if (org-element-property :name plain-list)
+      ;; Add an anchor for the list that have a "#+NAME:" definition
+      ;; to allow linking to it.
+      (let* ((first-item (car (org-element-contents plain-list)))
+	     (content-beg (- (org-element-property :contents-begin first-item)
+			     (org-element-property :begin first-item))))
+	(with-temp-buffer
+	  (insert contents)
+	  (goto-char (point-min))
+	  (forward-char content-beg)
+	  (insert (format "{anchor:%s} "
+			  (org-export-get-reference plain-list info)))
+	  (buffer-string)))
+    contents))
 
 (defun org-confluence-paragraph (paragraph contents info)
   "Transcode PARAGRAPH element for Confluence.
 CONTENTS is the paragraph contents.  INFO is a plist used as
 a communication channel."
-  contents)
+  (with-temp-buffer
+    (insert (org-confluence-escape-chars contents))
+    (let ((fill-column most-positive-fixnum))
+      (fill-region (point-min) (point-max))
+      (buffer-string))))
 
 (defun org-confluence-property-drawer (property-drawer contents info)
   (and (org-string-nw-p contents)
